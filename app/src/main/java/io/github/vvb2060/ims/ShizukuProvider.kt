@@ -16,10 +16,12 @@ import io.github.vvb2060.ims.privileged.ApnModifier
 import io.github.vvb2060.ims.privileged.BrokerInstrumentation
 import io.github.vvb2060.ims.privileged.CaptivePortalFixer
 import io.github.vvb2060.ims.privileged.ConfigReader
+import io.github.vvb2060.ims.privileged.ImsProvisioning
 import io.github.vvb2060.ims.privileged.ImsResetter
 import io.github.vvb2060.ims.privileged.ImsStatusReader
 import io.github.vvb2060.ims.privileged.ImsModifier
 import io.github.vvb2060.ims.privileged.SimReader
+import io.github.vvb2060.ims.privileged.WfcModeController
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -135,6 +137,37 @@ class ShizukuProvider : ShizukuProvider() {
             }
         }
 
+        suspend fun ensureVoImsProvisioning(context: Context, subId: Int): String? {
+            val args = Bundle().apply {
+                putInt(ImsProvisioning.BUNDLE_SELECT_SIM_ID, subId)
+                putBoolean(ImsProvisioning.BUNDLE_ENABLE, true)
+            }
+            val result = startInstrumentation(context, ImsProvisioning::class.java, args, true)
+            if (result == null) {
+                return "failed with empty result"
+            }
+            return if (result.getBoolean(ImsProvisioning.BUNDLE_RESULT)) {
+                null
+            } else {
+                result.getString(ImsProvisioning.BUNDLE_RESULT_MSG) ?: "unknown error"
+            }
+        }
+
+        suspend fun ensureCellularPreferredWfc(context: Context, subId: Int): String? {
+            val args = Bundle().apply {
+                putInt(WfcModeController.BUNDLE_SELECT_SIM_ID, subId)
+            }
+            val result = startInstrumentation(context, WfcModeController::class.java, args, true)
+            if (result == null) {
+                return "failed with empty result"
+            }
+            return if (result.getBoolean(WfcModeController.BUNDLE_RESULT)) {
+                null
+            } else {
+                result.getString(WfcModeController.BUNDLE_RESULT_MSG) ?: "unknown error"
+            }
+        }
+
         suspend fun readImsRegistrationStatus(context: Context, subId: Int): Boolean? {
             val args = Bundle().apply {
                 putInt(ImsStatusReader.BUNDLE_SELECT_SIM_ID, subId)
@@ -174,6 +207,22 @@ class ShizukuProvider : ShizukuProvider() {
                 putBoolean(ImsModifier.BUNDLE_PREFER_PERSISTENT, canUsePersistentOverride)
             }
             return overrideImsConfig(context, bundle)
+        }
+
+        suspend fun sanitizeApnImsType(context: Context, subId: Int): String? {
+            val args = Bundle().apply {
+                putInt(ApnModifier.BUNDLE_SELECT_SIM_ID, subId)
+                putBoolean(ApnModifier.BUNDLE_SANITIZE_IMS, true)
+            }
+            val result = startInstrumentation(context, ApnModifier::class.java, args, true)
+            if (result == null) {
+                return "failed with empty result"
+            }
+            return if (result.getBoolean(ApnModifier.BUNDLE_RESULT)) {
+                null
+            } else {
+                result.getString(ApnModifier.BUNDLE_RESULT_MSG) ?: "unknown error"
+            }
         }
 
         suspend fun queryCaptivePortalConfig(context: Context): CaptivePortalConfig? {

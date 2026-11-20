@@ -25,6 +25,7 @@ class ApnModifier : Instrumentation() {
         const val BUNDLE_TYPE = "type"
         const val BUNDLE_MCC = "mcc"
         const val BUNDLE_MNC = "mnc"
+        const val BUNDLE_SANITIZE_IMS = "sanitize_ims"
         const val BUNDLE_RESULT = "result"
         const val BUNDLE_RESULT_MSG = "result_msg"
     }
@@ -51,7 +52,13 @@ class ApnModifier : Instrumentation() {
         try {
             am.startDelegateShellPermissionIdentity(Os.getuid(), null)
             delegated = true
-            applyApn(arguments)
+            if (arguments.getBoolean(BUNDLE_SANITIZE_IMS, false) ||
+                arguments.getString(BUNDLE_SANITIZE_IMS) == "true"
+            ) {
+                sanitizeDefaultApnImsType()
+            } else {
+                applyApn(arguments)
+            }
             result.putBoolean(BUNDLE_RESULT, true)
         } catch (t: Throwable) {
             Log.e(TAG, "apply apn failed", t)
@@ -70,7 +77,7 @@ class ApnModifier : Instrumentation() {
         val subId = arguments.getInt(BUNDLE_SELECT_SIM_ID, -1)
         val name = arguments.getString(BUNDLE_NAME).orEmpty().trim()
         val apn = arguments.getString(BUNDLE_APN).orEmpty().trim()
-        val type = arguments.getString(BUNDLE_TYPE).orEmpty().trim().ifBlank { "default,supl,ims" }
+        val type = arguments.getString(BUNDLE_TYPE).orEmpty().trim().ifBlank { "default,supl" }
         val mcc = arguments.getString(BUNDLE_MCC).orEmpty().filter { it.isDigit() }.take(3)
         val mnc = arguments.getString(BUNDLE_MNC).orEmpty().filter { it.isDigit() }.take(3)
         require(subId >= 0) { "invalid subId" }
@@ -125,6 +132,54 @@ class ApnModifier : Instrumentation() {
             throw IllegalStateException("set preferred APN failed")
         }
         Log.i(TAG, "APN inserted for subId=$subId id=$apnId name=$name apn=$apn")
+    }
+
+    /**
+     * Removes the IMS type from default APNs when a dedicated IMS APN exists.
+     *
+     * Third-party tools sometimes append "ims" to the default APN type. Android then
+     * establishes the IMS PDN on that APN and never receives a P-CSCF address, so IMS
+     * registration fails. The dedicated "ims" APN must be used instead.
+     */
+    private fun sanitizeDefaultApnImsType() {
+        val rows = mutableListOf<Pair<Long, List<String>>>()
+        context.contentResolver.query(
+            APN_URI,
+            arrayOf("_id", "type"),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(0)
+                val parts = cursor.getString(1).orEmpty()
+                    .split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                rows.add(id to parts)
+            }
+        }
+        val hasDedicatedImsApn = rows.any { (_, parts) -> parts.size == 1 && parts[0] == "ims" }
+        if (!hasDedicatedImsApn) {
+            Log.i(TAG, "no dedicated IMS APN, skip sanitize")
+            return
+        }
+        var changed = 0
+        rows.forEach { (id, parts) ->
+            if (!parts.contains("ims") || !parts.contains("default")) return@forEach
+            val newType = parts.filter { it != "ims" }.joinToString(",")
+            val updated = context.contentResolver.update(
+                Uri.withAppendedPath(APN_URI, id.toString()),
+                ContentValues().apply { put("type", newType) },
+                null,
+                null
+            )
+            if (updated > 0) {
+                changed++
+                Log.i(TAG, "removed ims type from APN id=$id -> $newType")
+            }
+        }
+        Log.i(TAG, "sanitize default APN ims type, changed=$changed")
     }
 
     private fun findExistingApnId(

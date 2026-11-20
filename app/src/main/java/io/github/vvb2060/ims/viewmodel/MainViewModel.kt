@@ -235,6 +235,8 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
     private val binderListener = Shizuku.OnBinderReceivedListener { updateShizukuStatus() }
     private val binderDeadListener = Shizuku.OnBinderDeadListener { updateShizukuStatus() }
 
+    private var wfcGuardChecked = false
+
     init {
         pendingConfigRestoreAfterBoot = checkAndMarkBootChanged()
         loadSimList()
@@ -280,6 +282,27 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
             }
             if (status == ShizukuStatus.READY) {
                 maybeRestoreSavedConfigurationAfterBoot()
+                ensureCellularPreferredWfcIfNeeded()
+            }
+        }
+    }
+
+    /**
+     * Restores cellular-preferred Wi-Fi calling when Wi-Fi is preferred but IMS is not
+     * registered. Android 17 clears the cellular voice domain in that state, so the device
+     * loses voice entirely when the carrier ePDG tunnel is unavailable.
+     */
+    private suspend fun ensureCellularPreferredWfcIfNeeded() {
+        if (wfcGuardChecked) return
+        wfcGuardChecked = true
+        val sims = runCatching { ShizukuProvider.readSimInfoList(application) }.getOrElse {
+            Log.w(TAG, "wfc guard: read sim list failed", it)
+            return
+        }
+        sims.filter { it.subId >= 0 }.forEach { sim ->
+            val error = ShizukuProvider.ensureCellularPreferredWfc(application, sim.subId)
+            if (error != null) {
+                Log.w(TAG, "wfc guard failed for subId ${sim.subId}: $error")
             }
         }
     }
@@ -442,6 +465,20 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
         if (resultMsg == null) {
             // 仅在应用成功后保存配置，避免本地状态与系统状态不一致
             saveConfiguration(selectedSim.subId, map, countryMccOverride)
+            // VoLTE relies on the VoIMS opt-in provisioning flag (key 68). Without it the
+            // modem never advertises IMS voice capability, so 5G data works while IMS stays
+            // unregistered. Shizuku's shell identity is enough for this call.
+            if (enableVoLTE && selectedSim.subId >= 0) {
+                ShizukuProvider.ensureVoImsProvisioning(application, selectedSim.subId)
+            }
+            // A polluted default APN (type contains both "default" and "ims") makes Android
+            // establish the IMS PDN there, which never returns a P-CSCF address.
+            if (selectedSim.subId >= 0) {
+                ShizukuProvider.sanitizeApnImsType(application, selectedSim.subId)
+                // Android 17 drops the cellular voice domain while "Wi-Fi preferred" is set,
+                // so fall back to cellular when IMS is not registered.
+                ShizukuProvider.ensureCellularPreferredWfc(application, selectedSim.subId)
+            }
         }
         return resultMsg
     }
