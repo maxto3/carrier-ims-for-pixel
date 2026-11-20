@@ -1,17 +1,35 @@
-def kFile = rootProject.file('local.properties')
-def props = new Properties()
-if (kFile.canRead()) {
-    props.load(new FileInputStream(kFile))
+// Resolves signing credentials per value: local.properties first, then the
+// SIGN_KEY_* environment variables. Keeping the passwords out of local.properties
+// lets every project on this machine share the user-level environment variables,
+// while CI can inject the same names as secrets.
+def localPropertiesFile = rootProject.file('local.properties')
+def localProps = new Properties()
+if (localPropertiesFile.canRead()) {
+    localPropertiesFile.withInputStream { localProps.load(it) }
+}
 
-    if (props != null) {
-        android.signingConfigs.sign.storeFile file(props['SIGN_KEY_STORE_FILE'])
-        android.signingConfigs.sign.storePassword props['SIGN_KEY_STORE_PASSWORD']
-        android.signingConfigs.sign.keyAlias props['SIGN_KEY_ALIAS']
-        android.signingConfigs.sign.keyPassword props['SIGN_KEY_PASSWORD']
+def signingValue = { String name ->
+    def fromLocal = localProps.getProperty(name)
+    if (fromLocal != null && !fromLocal.trim().isEmpty()) {
+        return fromLocal.trim()
     }
+    def fromEnv = System.getenv(name)
+    if (fromEnv != null && !fromEnv.trim().isEmpty()) {
+        return fromEnv.trim()
+    }
+    return null
+}
+
+def storePath = signingValue('SIGN_KEY_STORE_FILE')
+def storePassword = signingValue('SIGN_KEY_STORE_PASSWORD')
+def keyAliasValue = signingValue('SIGN_KEY_ALIAS')
+def keyPassword = signingValue('SIGN_KEY_PASSWORD')
+
+if (storePath != null) {
+    android.signingConfigs.sign.storeFile file(storePath)
+    android.signingConfigs.sign.storePassword storePassword
+    android.signingConfigs.sign.keyAlias keyAliasValue
+    android.signingConfigs.sign.keyPassword keyPassword
 } else {
-    android.signingConfigs.sign.storeFile file(System.getenv('SIGN_KEY_STORE_FILE'))
-    android.signingConfigs.sign.storePassword System.getenv('SIGN_KEY_STORE_PASSWORD')
-    android.signingConfigs.sign.keyAlias System.getenv('SIGN_KEY_ALIAS')
-    android.signingConfigs.sign.keyPassword System.getenv('SIGN_KEY_PASSWORD')
+    logger.warn('No signing key configured (SIGN_KEY_STORE_FILE missing); release APK will be unsigned')
 }
