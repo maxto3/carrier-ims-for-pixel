@@ -91,9 +91,20 @@ class ImsProvisioning : Instrumentation() {
             for (subId in subIds) {
                 val current = getter.invoke(telephony, subId, KEY_VOIMS_OPT_IN_STATUS) as Int
                 Log.i(TAG, "provisioning[68] subId=$subId current=$current target=$targetValue")
-                if (current == targetValue) continue
-                setter.invoke(telephony, subId, KEY_VOIMS_OPT_IN_STATUS, targetValue)
-                Log.i(TAG, "provisioning[68] subId=$subId updated to $targetValue")
+                if (current != targetValue) {
+                    setter.invoke(telephony, subId, KEY_VOIMS_OPT_IN_STATUS, targetValue)
+                    Log.i(TAG, "provisioning[68] subId=$subId updated to $targetValue")
+                }
+                if (enable) {
+                    // Once voims=1 the user switch no longer falls back to the carrier default,
+                    // so an unset (-1) value is read as disabled. Write it explicitly.
+                    if (readBoolean(telephony, "isAdvancedCallingSettingEnabled", subId) != true) {
+                        writeBoolean(telephony, "setAdvancedCallingSettingEnabled", subId, true)
+                    }
+                    if (readBoolean(telephony, "isVoNrEnabled", subId) != true) {
+                        writeBoolean(telephony, "setVoNrEnabled", subId, true)
+                    }
+                }
             }
 
             result.putBoolean(BUNDLE_RESULT, true)
@@ -109,5 +120,22 @@ class ImsProvisioning : Instrumentation() {
         }
 
         finish(Activity.RESULT_OK, result)
+    }
+
+    private fun readBoolean(telephony: Any, methodName: String, subId: Int): Boolean? =
+        runCatching {
+            val method = telephony.javaClass.getMethod(methodName, Integer.TYPE)
+            method.invoke(telephony, subId) as? Boolean
+        }.onFailure { Log.w(TAG, "$methodName failed", it) }.getOrNull()
+
+    private fun writeBoolean(telephony: Any, methodName: String, subId: Int, value: Boolean) {
+        runCatching {
+            val method = telephony.javaClass.getMethod(
+                methodName,
+                Integer.TYPE,
+                Boolean::class.javaPrimitiveType
+            )
+            method.invoke(telephony, subId, value)
+        }.onFailure { Log.w(TAG, "$methodName failed", it) }
     }
 }
