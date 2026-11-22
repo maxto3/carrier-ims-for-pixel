@@ -1,3 +1,15 @@
+## 3.9.2 (2026-11-22)
+
+### 修复
+- 应用配置时写入 VoIMS opt-in（provisioning key 68），避免网络不下发 VoPS，导致 5G 可用但 IMS 无法注册。
+- 清理默认 APN 中被混入的 ims 类型，确保 IMS PDN 使用专用 APN 并获取 P-CSCF 地址。
+- WLAN 优先且 IMS 未注册时自动回退蜂窝优先，修复 Android 17 上选择“通过 WLAN 进行通话”后 IMS 停止注册的问题。
+
+### 构建
+- 签名凭据支持从 `local.properties` 或 `SIGN_KEY_*` 环境变量读取，便于本机与 CI 共用。
+
+---
+
 ## 3.9.1 (2026-10-18)
 
 ### 修复
