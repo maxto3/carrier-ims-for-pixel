@@ -225,6 +225,23 @@ class ShizukuProvider : ShizukuProvider() {
             }
         }
 
+        suspend fun healImsApnType(context: Context, mcc: String, mnc: String): String? {
+            val args = Bundle().apply {
+                putString(ApnModifier.BUNDLE_MCC, mcc)
+                putString(ApnModifier.BUNDLE_MNC, mnc)
+                putBoolean(ApnModifier.BUNDLE_HEAL_ONLY, true)
+            }
+            val result = startInstrumentation(context, ApnModifier::class.java, args, true)
+            if (result == null) {
+                return "failed with empty result"
+            }
+            return if (result.getBoolean(ApnModifier.BUNDLE_RESULT)) {
+                null
+            } else {
+                result.getString(ApnModifier.BUNDLE_RESULT_MSG) ?: "unknown error"
+            }
+        }
+
         suspend fun queryCaptivePortalConfig(context: Context): CaptivePortalConfig? {
             val args = Bundle().apply {
                 putString(CaptivePortalFixer.BUNDLE_ACTION, CaptivePortalFixer.actionQuery())

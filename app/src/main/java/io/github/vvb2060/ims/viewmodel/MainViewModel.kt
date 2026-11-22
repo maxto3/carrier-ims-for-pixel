@@ -77,6 +77,7 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
         private const val NETWORK_EXIT_CHECK_TIMEOUT_MS = 4_000
         private const val IMS_REGISTER_RETRY_COUNT = 4
         private const val IMS_REGISTER_RETRY_DELAY_MS = 2_000L
+        private const val APN_HEAL_MIN_INTERVAL_MILLIS = 5 * 60 * 1000L
         private const val NETWORK_EXIT_API_URL = "https://ipapi.co/json/"
         private const val PROJECT_SOURCE_AD_SLOTS_PATH = "/api/sources/carrier-ims/ad-slots"
         private const val PROJECT_PUBLIC_AD_SLOTS_PATH = "/api/project/public-ad-slots?project_id=carrier-ims"
@@ -236,6 +237,8 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
     private val binderDeadListener = Shizuku.OnBinderDeadListener { updateShizukuStatus() }
 
     private var wfcGuardChecked = false
+    private var lastApnHealAtMillis = 0L
+    private var healingApnDrift = false
 
     init {
         pendingConfigRestoreAfterBoot = checkAndMarkBootChanged()
@@ -283,6 +286,7 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
             if (status == ShizukuStatus.READY) {
                 maybeRestoreSavedConfigurationAfterBoot()
                 ensureCellularPreferredWfcIfNeeded()
+                maybeHealImsApnDrift()
             }
         }
     }
@@ -303,6 +307,34 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
             val error = ShizukuProvider.ensureCellularPreferredWfc(application, sim.subId)
             if (error != null) {
                 Log.w(TAG, "wfc guard failed for subId ${sim.subId}: $error")
+            }
+        }
+    }
+
+    /**
+     * Re-checks whether SIM/OTA provisioning merged "ims" back into a general APN row.
+     * Carrier updates can restore the combined type, so the split has to be re-applied;
+     * a throttle avoids frequent instrumentation calls.
+     */
+    private fun maybeHealImsApnDrift() {
+        if (healingApnDrift) return
+        val now = System.currentTimeMillis()
+        if (now - lastApnHealAtMillis < APN_HEAL_MIN_INTERVAL_MILLIS) return
+        lastApnHealAtMillis = now
+        healingApnDrift = true
+        viewModelScope.launch {
+            try {
+                for (sim in _allSimList.value.filter { it.subId >= 0 }) {
+                    val mcc = SupportRules.normalizeMcc(sim.mcc)
+                    val mnc = SupportRules.normalizeMnc(sim.mnc)
+                    if (mcc.length != 3 || mnc.length !in 2..3) continue
+                    val error = ShizukuProvider.healImsApnType(application, mcc, mnc)
+                    if (error != null) {
+                        Log.w(TAG, "heal ims apn failed for subId ${sim.subId}: $error")
+                    }
+                }
+            } finally {
+                healingApnDrift = false
             }
         }
     }

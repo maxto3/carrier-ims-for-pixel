@@ -26,6 +26,7 @@ class ApnModifier : Instrumentation() {
         const val BUNDLE_MCC = "mcc"
         const val BUNDLE_MNC = "mnc"
         const val BUNDLE_SANITIZE_IMS = "sanitize_ims"
+        const val BUNDLE_HEAL_ONLY = "heal_only"
         const val BUNDLE_RESULT = "result"
         const val BUNDLE_RESULT_MSG = "result_msg"
     }
@@ -52,7 +53,11 @@ class ApnModifier : Instrumentation() {
         try {
             am.startDelegateShellPermissionIdentity(Os.getuid(), null)
             delegated = true
-            if (arguments.getBoolean(BUNDLE_SANITIZE_IMS, false) ||
+            if (arguments.getBoolean(BUNDLE_HEAL_ONLY, false) ||
+                arguments.getString(BUNDLE_HEAL_ONLY) == "true"
+            ) {
+                healImsType(arguments)
+            } else if (arguments.getBoolean(BUNDLE_SANITIZE_IMS, false) ||
                 arguments.getString(BUNDLE_SANITIZE_IMS) == "true"
             ) {
                 sanitizeDefaultApnImsType()
@@ -134,52 +139,126 @@ class ApnModifier : Instrumentation() {
         Log.i(TAG, "APN inserted for subId=$subId id=$apnId name=$name apn=$apn")
     }
 
-    /**
-     * Removes the IMS type from default APNs when a dedicated IMS APN exists.
-     *
-     * Third-party tools sometimes append "ims" to the default APN type. Android then
-     * establishes the IMS PDN on that APN and never receives a P-CSCF address, so IMS
-     * registration fails. The dedicated "ims" APN must be used instead.
-     */
-    private fun sanitizeDefaultApnImsType() {
-        val rows = mutableListOf<Pair<Long, List<String>>>()
+    private data class ApnRow(
+        val id: Long,
+        val apn: String,
+        val name: String,
+        val subId: Int,
+        val numeric: String,
+        val types: List<String>,
+    )
+
+    private fun queryApnRows(numeric: String?): List<ApnRow> {
+        val selection = if (numeric != null) "numeric=?" else null
+        val selectionArgs = if (numeric != null) arrayOf(numeric) else null
+        val rows = mutableListOf<ApnRow>()
         context.contentResolver.query(
             APN_URI,
-            arrayOf("_id", "type"),
-            null,
-            null,
+            arrayOf("_id", "apn", "name", "type", "sub_id", "numeric"),
+            selection,
+            selectionArgs,
             null
         )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow("_id")
+            val apnIndex = cursor.getColumnIndexOrThrow("apn")
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            val typeIndex = cursor.getColumnIndexOrThrow("type")
+            val subIndex = cursor.getColumnIndexOrThrow("sub_id")
+            val numericIndex = cursor.getColumnIndexOrThrow("numeric")
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(0)
-                val parts = cursor.getString(1).orEmpty()
-                    .split(",")
-                    .map { it.trim() }
-                    .filter { it.isNotEmpty() }
-                rows.add(id to parts)
+                rows.add(
+                    ApnRow(
+                        id = cursor.getLong(idIndex),
+                        apn = cursor.getString(apnIndex).orEmpty(),
+                        name = cursor.getString(nameIndex).orEmpty(),
+                        subId = if (cursor.isNull(subIndex)) -1 else cursor.getInt(subIndex),
+                        numeric = cursor.getString(numericIndex).orEmpty(),
+                        types = cursor.getString(typeIndex).orEmpty()
+                            .split(",")
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() },
+                    )
+                )
             }
         }
-        val hasDedicatedImsApn = rows.any { (_, parts) -> parts.size == 1 && parts[0] == "ims" }
-        if (!hasDedicatedImsApn) {
-            Log.i(TAG, "no dedicated IMS APN, skip sanitize")
-            return
-        }
-        var changed = 0
-        rows.forEach { (id, parts) ->
-            if (!parts.contains("ims") || !parts.contains("default")) return@forEach
-            val newType = parts.filter { it != "ims" }.joinToString(",")
+        return rows
+    }
+
+    /**
+     * Splits the IMS type out of any APN row that mixes it with other types.
+     *
+     * Android 17 never brings up a clean IMS-only PDN when "ims" shares a row with
+     * "default"/"supl", so the modem never receives a P-CSCF address. When [createImsRow]
+     * is set and no dedicated IMS APN exists yet, one is inserted so the IMS PDN always
+     * has a bearer of its own.
+     */
+    private fun sanitizeDefaultApnImsType(
+        numeric: String? = null,
+        createImsRow: Boolean = false,
+    ): Boolean {
+        val rows = queryApnRows(numeric)
+        if (rows.isEmpty()) return false
+        var changed = false
+        for (row in rows) {
+            if (row.types.size <= 1 || !row.types.contains("ims")) continue
+            val newType = row.types.filter { it != "ims" }.joinToString(",")
             val updated = context.contentResolver.update(
-                Uri.withAppendedPath(APN_URI, id.toString()),
+                Uri.withAppendedPath(APN_URI, row.id.toString()),
                 ContentValues().apply { put("type", newType) },
                 null,
                 null
             )
             if (updated > 0) {
-                changed++
-                Log.i(TAG, "removed ims type from APN id=$id -> $newType")
+                changed = true
+                Log.i(TAG, "split ims out of APN id=${row.id} -> $newType")
             }
         }
-        Log.i(TAG, "sanitize default APN ims type, changed=$changed")
+        val hasDedicatedIms = rows.any { it.types.size == 1 && it.types[0] == "ims" }
+        if (createImsRow && !hasDedicatedIms) {
+            val source = rows.firstOrNull { it.subId >= 0 } ?: rows.first()
+            changed = insertDedicatedImsRow(source) || changed
+        }
+        return changed
+    }
+
+    private fun insertDedicatedImsRow(source: ApnRow): Boolean {
+        val numeric = source.numeric.filter { it.isDigit() }
+        if (numeric.length !in 5..6) {
+            Log.w(TAG, "cannot derive numeric for IMS APN, skip insert")
+            return false
+        }
+        val mcc = numeric.take(3)
+        val mnc = numeric.drop(3)
+        val values = ContentValues().apply {
+            put("name", "IMS")
+            put("apn", "ims")
+            put("type", "ims")
+            put("mcc", mcc)
+            put("mnc", mnc)
+            put("numeric", numeric)
+            put("protocol", "IPV4V6")
+            put("roaming_protocol", "IPV4V6")
+            put("carrier_enabled", 1)
+            put("edited", 1)
+            if (source.subId >= 0) put("sub_id", source.subId)
+        }
+        val inserted = context.contentResolver.insert(APN_URI, values) ?: return false
+        Log.i(TAG, "created dedicated IMS APN id=${inserted.lastPathSegment} numeric=$numeric")
+        return true
+    }
+
+    /**
+     * Periodic self-heal path: SIM or OTA provisioning can merge "ims" back into a general
+     * APN row after the initial split, so this re-checks a single numeric and repairs it.
+     */
+    private fun healImsType(arguments: Bundle) {
+        val mcc = arguments.getString(BUNDLE_MCC).orEmpty().filter { it.isDigit() }.take(3)
+        val mnc = arguments.getString(BUNDLE_MNC).orEmpty().filter { it.isDigit() }.take(3)
+        require(mcc.length == 3) { "MCC must be 3 digits" }
+        require(mnc.length in 2..3) { "MNC must be 2 or 3 digits" }
+        val numeric = mcc + mnc
+        val changed = sanitizeDefaultApnImsType(numeric, createImsRow = true)
+        Log.i(TAG, "heal ims apn type for $numeric, changed=$changed")
     }
 
     private fun findExistingApnId(
