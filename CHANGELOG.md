@@ -1,3 +1,12 @@
+## 3.9.3 (2026-11-22)
+
+### 优化
+- IMS APN 自愈：Shizuku 就绪时按 5 分钟节流复查，SIM/OTA 制式配置把 `ims` 合并回通用 APN 时自动重新拆分。
+- 运营商缺少独立 IMS APN 时自动创建 `apn=ims`、`type=ims` 条目，确保 IMS PDN 有独立承载。
+- 应用 VoLTE 配置时同步补写 VoLTE 用户开关与 VoNR，避免 VoIMS opt-in 已开启但用户开关未设置导致 VoLTE 被判为关闭。
+
+---
+
 ## 3.9.2 (2026-11-22)
 
 ### 修复
